@@ -3,7 +3,8 @@ from itertools import zip_longest
 import typing
 
 
-from .instructions import INSTRUCTIONS, VIRTUAL_INSTRUCTIONS, InstructionInfo, FAKE_OP_CONST, FAKE_OP_ALIAS
+from .instructions import INSTRUCTIONS, VIRTUAL_INSTRUCTIONS, InstructionInfo, FAKE_OP_CONST, FAKE_OP_ALIAS, CHIP_OP_MOV, \
+    CHIP_OP_SLP, CHIP_OP_GEN
 from .parse import Instruction, Parser
 from .source import LineOfSource, SourcePosition
 from .errors import IssueLog
@@ -96,6 +97,9 @@ def assemble(issues: IssueLog, lines: [LineOfSource], chip: ChipInfo) -> [Instru
     # TODO: detect unused aliases/constants?
     # TODO: optimisation pass?
 
+    output = optimize_code(output)
+
+
     # now we know how many lines of assembly we're generating, will it fit on the chip?
     if len(output) > chip.memory:
         issues.warning(
@@ -106,6 +110,68 @@ def assemble(issues: IssueLog, lines: [LineOfSource], chip: ChipInfo) -> [Instru
         )
 
     return output
+
+
+def optimize_code(instructions):
+    found = True
+
+    while found:
+        # Find a gen P X Y pattern
+        [instructions,found] = _optimize_code_gen(instructions)
+
+    return instructions
+
+
+def _optimize_code_gen(instructions):
+    """
+        Check for the pattern
+        MOV 100 P
+        SLP X
+        MOV 0 P
+        SLP Y
+    """
+    for idx in range(3, len(instructions)):
+        current = instructions[idx]
+        if current.mneumonic == CHIP_OP_SLP:
+
+            if instructions[idx - 2].mneumonic != CHIP_OP_SLP:
+                continue
+            if instructions[idx - 1].mneumonic != CHIP_OP_MOV:
+                continue
+            if instructions[idx - 3].mneumonic != CHIP_OP_MOV:
+                continue
+            if instructions[idx - 3].args != ['100', instructions[idx - 1].args[1]]:
+                continue
+            if instructions[idx - 1].args[0] != '0':
+                continue
+
+            # Check conditions
+            for x in range(1, 4):
+                if instructions[idx - x].condition != current.condition:
+                    continue
+
+            # Check labels
+            # The first instruction is allowed to have a label
+            for x in range(0, 3):
+                if instructions[idx - x].label is not None:
+                    continue
+
+            register = instructions[idx - 1].args[1]
+            sleep_duration_1 = instructions[idx - 2].args[0]
+            sleep_duration_2 = current.args[0]
+            pos = idx - 3
+
+            new_instruction = Instruction(None, instructions[idx - 3].label, current.condition, CHIP_OP_GEN,
+                                          [register, sleep_duration_1, sleep_duration_2])
+
+            for x in range(0, 4):
+                instructions.remove(instructions[idx - x])
+
+            instructions.insert(pos, new_instruction)
+
+            return [instructions, True]
+    return [instructions, False]
+
 
 
 def assemble_instruction(issues: IssueLog, symbols: typing.Dict[str, Symbol], inst: [Instruction]):
