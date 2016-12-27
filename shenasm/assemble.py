@@ -4,7 +4,7 @@ import typing
 
 
 from .instructions import INSTRUCTIONS, VIRTUAL_INSTRUCTIONS, InstructionInfo, FAKE_OP_CONST, FAKE_OP_ALIAS, CHIP_OP_MOV, \
-    CHIP_OP_SLP, CHIP_OP_GEN
+    CHIP_OP_SLP, CHIP_OP_GEN, CHIP_OP_ADD, CHIP_OP_MUL
 from .parse import Instruction, Parser
 from .source import LineOfSource, SourcePosition
 from .errors import IssueLog
@@ -113,11 +113,15 @@ def assemble(issues: IssueLog, lines: [LineOfSource], chip: ChipInfo) -> [Instru
 
 
 def optimize_code(instructions):
-    found = True
+    foundLoop = True
 
-    while found:
+    while foundLoop:
+        foundLoop = False
         # Find a gen P X Y pattern
-        [instructions,found] = _optimize_code_gen(instructions)
+        [instructions, found] = _optimize_code_gen(instructions)
+        foundLoop |= found
+        [instructions, found] = _optimize_code_mul(instructions)
+        foundLoop |= found
 
     return instructions
 
@@ -172,6 +176,63 @@ def _optimize_code_gen(instructions):
             return [instructions, True]
     return [instructions, False]
 
+
+def _optimize_code_mul(instructions):
+    """
+    Optimize multiplication
+
+    Search for
+        add acc
+        add acc
+        [...]
+    And replace it with mul X
+    :param instructions: The instructions
+    :return: the instructions after optimization, and a boolean whether something has been optimized
+    """
+    current_mul = 1
+    current_num = 0
+    last_condition = None
+    for idx in range(len(instructions), 0, -1):
+        current_idx = idx - 1
+        current_instr = instructions[current_idx]
+
+        if last_condition is None:
+            last_condition = current_instr.condition
+
+        if current_instr.mneumonic != CHIP_OP_ADD \
+                or current_instr.args != ['acc'] \
+                or current_instr.condition != last_condition:
+            # Do not change add acc if it is only mul 2 (for further optimizations)
+            if current_mul > 2:
+                new_instruction = Instruction(None, instructions[current_idx + 1].condition,
+                                              instructions[current_idx + 1].label, CHIP_OP_MUL,
+                                              ["%d" % current_mul])
+
+                for x in range(0, current_num):
+                    instructions.remove(instructions[current_idx + 1])
+
+                instructions.insert(current_idx + 1, new_instruction)
+
+                return [instructions, True]
+            else:
+                # Reset the variables
+                last_condition = None
+                current_mul = 1
+                current_num = 0
+                continue
+
+        # We found one valid multiply!
+        # Atm it is only mul 2 and is no real optimization
+        # We have to search for more
+        current_mul *= 2
+        current_num += 1
+
+        # Set the last_condition to "INVALID"
+        # Using this `hack`, the first add with an label is the accepted
+        if current_instr.label is not None:
+            last_condition = "INVALID"
+
+    return [instructions, False]
 
 
 def assemble_instruction(issues: IssueLog, symbols: typing.Dict[str, Symbol], inst: [Instruction]):
